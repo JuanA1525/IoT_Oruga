@@ -13,9 +13,8 @@ def set_instruction():
         return jsonify({'error': 'Invalid instruction'}), 400
 
     instruction_service.set_instruction(instruction)
-    return jsonify({'current_instruction': instruction_service.get_instruction()}), 200
+    return jsonify({'current_instruction': instruction_service.get_instruction()})
 
 @api.route('/instruction', methods=['GET'])
 def get_instruction():
-    current_instruction = instruction_service.get_instruction()
-    return jsonify({'current_instruction': current_instruction}), 200
+    return jsonify({'current_instruction': instruction_service.get_instruction()})
