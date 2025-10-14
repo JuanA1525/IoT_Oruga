@@ -1,1 +1,3 @@
-# This file is intentionally left blank.
+from .instruction_service import InstructionService
+
+__all__ = ['InstructionService']
