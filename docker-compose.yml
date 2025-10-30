@@ -1,6 +1,15 @@
 version: '3.8'
 
 services:
+  sysctl-init:
+    image: busybox:1.36
+    container_name: sysctl-init
+    privileged: true
+    pid: "host"
+    command: sh -c "echo 262144 > /proc/sys/vm/max_map_count || true"
+    restart: "no"
+    network_mode: "none"
+
   iot-agent:
     build:
       context: ./Agente
@@ -81,6 +90,8 @@ services:
     image: crate
     hostname: crate-db
     container_name: db-crate
+    depends_on:
+      - sysctl-init
     ports:
       - "4200:4200"
       - "4300:4300"
