@@ -14,6 +14,22 @@ services:
     networks:
       - iot-network
 
+  oruga-controller:
+    build:
+      context: ./Oruga_Controller
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ORION_BASE_URL=http://orion:1026
+      - ENTITY_ID=oruga
+    depends_on:
+      - orion
+    volumes:
+      - ./Oruga_Controller:/app
+    networks:
+      - iot-network
+
   orion:
     image: fiware/orion-ld
     hostname: orion
