@@ -14,6 +14,89 @@ services:
     networks:
       - iot-network
 
+  orion:
+    image: fiware/orion-ld
+    hostname: orion
+    container_name: orion
+    depends_on:
+      - mongo-db
+    expose:
+      - "1026"
+    ports:
+      - "1026:1026"
+    command: -dbhost mongo-db -logLevel DEBUG
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail -s http://localhost:1026/version || exit 1"]
+      interval: 10m0s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    networks:
+      - iot-network
+
+  quantumleap:
+    image: orchestracities/quantumleap
+    hostname: quantumleap
+    container_name: fiware-quantumleap
+    ports:
+      - "8668:8668"
+    depends_on:
+      - crate-db
+    environment:
+      - CRATE_HOST=crate-db
+      - LOGLEVEL=DEBUG
+    networks:
+      - iot-network
+
+  mongo-db:
+    image: mongo:3.6
+    hostname: mongo-db
+    container_name: db-mongo
+    expose:
+      - "27017"
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-db:/data/db
+    networks:
+      - iot-network
+
+  crate-db:
+    image: crate
+    hostname: crate-db
+    container_name: db-crate
+    ports:
+      - "4200:4200"
+      - "4300:4300"
+      - "5432:5432"
+    command: crate -Cauth.host_based.enabled=false  -Ccluster.name=democluster -Chttp.cors.enabled=true -Chttp.cors.allow-origin="*"
+    environment:
+      - CRATE_HEAP_SIZE=4g
+    volumes:
+      - crate-db:/data
+    networks:
+      - iot-network
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    depends_on:
+      - crate-db
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana:/var/lib/grafana
+    networks:
+      - iot-network
+
 networks:
   iot-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.19.1.0/24
+
+volumes:
+  mongo-db: ~
+  crate-db: ~
+  grafana: ~
