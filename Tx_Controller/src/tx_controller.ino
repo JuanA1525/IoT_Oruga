@@ -13,7 +13,7 @@
 #endif
 
 #ifndef CONFIG_RADIO_FREQ
-#define CONFIG_RADIO_FREQ           910.0
+#define CONFIG_RADIO_FREQ           920.0
 #endif
 #ifndef CONFIG_RADIO_OUTPUT_POWER
 #define CONFIG_RADIO_OUTPUT_POWER   17
@@ -30,7 +30,7 @@
 #define CONFIG_WIFI_STA_PASS ""
 #endif
 #ifndef CONFIG_API_URL
-#define CONFIG_API_URL "http://54.81.22.123:5000/api/instruction"
+#define CONFIG_API_URL "http://54.81.22.123:1026/v2/entities/oruga/attrs"
 #endif
 #ifndef CONFIG_POLL_INTERVAL_MS
 #define CONFIG_POLL_INTERVAL_MS 500
@@ -39,10 +39,14 @@
 // No AP / Web UI: cloud-only control
 
 uint8_t sequenceCounter = 0;
-uint8_t currentLeftSpeed = 10;   // default to 10 as requested
-uint8_t currentRightSpeed = 10;  // default to 10 as requested
+uint8_t currentLeftSpeed = 10;
+uint8_t currentRightSpeed = 10;
 String lastState = "STOP";
 unsigned long g_lastPollMs = 0;
+uint8_t lastSentLeftSpeed = 10;
+uint8_t lastSentRightSpeed = 10;
+TankControl::Command lastCommandSent = TankControl::Command::Stop;
+bool apiErrorActive = false;
 
 // (Web UI removed)
 
@@ -166,18 +170,59 @@ void beginStaIfConfigured() {
   }
 }
 
-// ----------- Minimal JSON parsing for {"current_instruction":"..."} -----------
-String parseInstructionFromJson(const String &json) {
-  int keyPos = json.indexOf("\"current_instruction\"");
-  if (keyPos < 0) return String();
-  int colon = json.indexOf(':', keyPos);
-  if (colon < 0) return String();
-  // find first quote after colon
+// ----------- Minimal JSON parsing for new API shape -----------
+// Expecting:
+// {
+//   "estado": { "type": "String", "value": "stop", ... },
+//   "left_speed": { "type": "int", "value": 10, ... },
+//   "right_speed": { "type": "int", "value": 10, ... }
+// }
+
+static bool extractStringFieldValue(const String &json, const char *fieldName, String &out) {
+  String key = String('"') + fieldName + '"';
+  int keyPos = json.indexOf(key);
+  if (keyPos < 0) return false;
+  int valueKey = json.indexOf("\"value\"", keyPos);
+  if (valueKey < 0) return false;
+  int colon = json.indexOf(':', valueKey);
+  if (colon < 0) return false;
   int firstQuote = json.indexOf('"', colon + 1);
-  if (firstQuote < 0) return String();
+  if (firstQuote < 0) return false;
   int secondQuote = json.indexOf('"', firstQuote + 1);
-  if (secondQuote < 0) return String();
-  return json.substring(firstQuote + 1, secondQuote);
+  if (secondQuote < 0) return false;
+  out = json.substring(firstQuote + 1, secondQuote);
+  return true;
+}
+
+static bool extractIntFieldValue(const String &json, const char *fieldName, int &out) {
+  String key = String('"') + fieldName + '"';
+  int keyPos = json.indexOf(key);
+  if (keyPos < 0) return false;
+  int valueKey = json.indexOf("\"value\"", keyPos);
+  if (valueKey < 0) return false;
+  int colon = json.indexOf(':', valueKey);
+  if (colon < 0) return false;
+  // number may have spaces; read until non-digit/non-space/non-minus
+  int i = colon + 1;
+  while (i < (int)json.length() && (json[i] == ' ' || json[i] == '\t')) i++;
+  int start = i;
+  while (i < (int)json.length() && ((json[i] >= '0' && json[i] <= '9') || json[i] == '-')) i++;
+  if (i == start) return false;
+  out = String(json.substring(start, i)).toInt();
+  return true;
+}
+
+static bool parseApiPayload(const String &json, String &estado, int &left, int &right) {
+  String estadoTmp;
+  int leftTmp = -1, rightTmp = -1;
+  bool okEstado = extractStringFieldValue(json, "estado", estadoTmp);
+  bool okL = extractIntFieldValue(json, "left_speed", leftTmp);
+  bool okR = extractIntFieldValue(json, "right_speed", rightTmp);
+  if (!okEstado || !okL || !okR) return false;
+  estado = estadoTmp;
+  left = leftTmp;
+  right = rightTmp;
+  return true;
 }
 
 void updateLastStateFromCmd(TankControl::Command cmd) {
@@ -200,9 +245,13 @@ void pollCloudAndControlTank() {
 
   // If STA not connected or unavailable, send STOP for safety
   if (!hasStaCredentials() || WiFi.status() != WL_CONNECTED) {
-    Serial.println("[CLOUD] STA not connected or credentials missing → sending STOP");
-    sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
-    updateLastStateFromCmd(TankControl::Command::Stop);
+    if (!apiErrorActive) {
+      Serial.println("[CLOUD] STA not connected or credentials missing → sending STOP (entering error state)");
+      sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
+      updateLastStateFromCmd(TankControl::Command::Stop);
+      lastCommandSent = TankControl::Command::Stop;
+      apiErrorActive = true;
+    }
     return;
   }
 
@@ -213,34 +262,60 @@ void pollCloudAndControlTank() {
   int code = http.GET();
   Serial.printf("[CLOUD] HTTP status: %d\n", code);
   if (code == HTTP_CODE_OK) {
+    apiErrorActive = false; // recovered
     String body = http.getString();
     Serial.print("[CLOUD] body: ");
     Serial.println(body);
-    String instr = parseInstructionFromJson(body);
-    instr.toLowerCase();
-    Serial.printf("[CLOUD] parsed instruction: '%s'\n", instr.c_str());
-    if (instr.length() == 0) {
-      // malformed payload → STOP
-      Serial.println("[CLOUD] malformed JSON → sending STOP");
-      sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
-      updateLastStateFromCmd(TankControl::Command::Stop);
-    } else {
-      TankControl::Command cmd = parseCommand(instr);
-      // Ensure speeds are 10 (in case something changed them elsewhere)
-      currentLeftSpeed = 10;
-      currentRightSpeed = 10;
-      // Optionally ensure receiver has speed set; sending frequently is fine
-      // sendLoRaFrame(TankControl::Command::SetSpeed, currentLeftSpeed, currentRightSpeed);
-      Serial.printf("[CLOUD] sending cmd=%d L=%d R=%d\n", static_cast<int>(cmd), currentLeftSpeed, currentRightSpeed);
+    String estado;
+    int l, r;
+    if (!parseApiPayload(body, estado, l, r)) {
+      // malformed payload → STOP on transition
+      if (!apiErrorActive) {
+        Serial.println("[CLOUD] malformed JSON → sending STOP (entering error state)");
+        sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
+        updateLastStateFromCmd(TankControl::Command::Stop);
+        lastCommandSent = TankControl::Command::Stop;
+        apiErrorActive = true;
+      }
+      http.end();
+      return;
+    }
+    // Normalize and clamp
+    estado.toLowerCase();
+    l = constrain(l, 0, 255);
+    r = constrain(r, 0, 255);
+    Serial.printf("[CLOUD] parsed estado='%s' left=%d right=%d\n", estado.c_str(), l, r);
+
+    // 1) If speeds changed vs last sent, update and send SetSpeed
+    if (l != lastSentLeftSpeed || r != lastSentRightSpeed) {
+      currentLeftSpeed = (uint8_t)l;
+      currentRightSpeed = (uint8_t)r;
+      Serial.printf("[CLOUD] speeds changed → SetSpeed L=%d R=%d\n", currentLeftSpeed, currentRightSpeed);
+      if (sendLoRaFrame(TankControl::Command::SetSpeed, currentLeftSpeed, currentRightSpeed)) {
+        lastSentLeftSpeed = currentLeftSpeed;
+        lastSentRightSpeed = currentRightSpeed;
+        updateLastStateFromCmd(TankControl::Command::SetSpeed);
+      }
+    }
+
+    // 2) If estado changed, send movement command
+    TankControl::Command cmd = parseCommand(estado);
+    if (cmd != lastCommandSent) {
+      Serial.printf("[CLOUD] estado changed → send cmd=%d with L=%d R=%d\n", static_cast<int>(cmd), currentLeftSpeed, currentRightSpeed);
       if (sendLoRaFrame(cmd, currentLeftSpeed, currentRightSpeed)) {
+        lastCommandSent = cmd;
         updateLastStateFromCmd(cmd);
       }
     }
   } else {
-    // Any HTTP or transport error → STOP for safety
-    Serial.println("[CLOUD] request failed → sending STOP");
-    sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
-    updateLastStateFromCmd(TankControl::Command::Stop);
+    // Any HTTP or transport error → STOP for safety only on transition
+    if (!apiErrorActive) {
+      Serial.println("[CLOUD] request failed → sending STOP (entering error state)");
+      sendLoRaFrame(TankControl::Command::Stop, currentLeftSpeed, currentRightSpeed);
+      updateLastStateFromCmd(TankControl::Command::Stop);
+      lastCommandSent = TankControl::Command::Stop;
+      apiErrorActive = true;
+    }
   }
   http.end();
 }
