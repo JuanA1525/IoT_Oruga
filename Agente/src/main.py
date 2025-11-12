@@ -1,5 +1,9 @@
 from flask import Flask
 from api.routes import api
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present (for local/dev)
+load_dotenv()
 
 app = Flask(__name__)
 app.register_blueprint(api, url_prefix='/api')

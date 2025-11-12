@@ -3,3 +3,5 @@ Werkzeug
 flask-cors
 pytest
 requests
+pycryptodome
+python-dotenv
